@@ -1,0 +1,4 @@
+aftman.toml
+.vscode
+dev/__pycache__
+sourcemap.json
