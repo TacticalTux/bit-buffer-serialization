@@ -1,8 +1,5 @@
--- Written by kaz_iaa 2023
--- Distributed under the MIT license
-
 local BitBufferSerialization = {}
-BitBufferSerialization.Epoch = 4 -- if theres a change that breaks older strings, use this to differentiate.
+BitBufferSerialization.Epoch = 9 -- if theres a change that breaks older strings, use this to differentiate.\
 
 --[[
 FUTURE TODO:
@@ -19,8 +16,24 @@ local Types = {}
 local LoadingTypes = {}
 local TypeToId = {} -- used temp in loading for efficiency, cleared after
 
+-- PartTagger is not public, disabled in public releases. It provides hacky Union & MeshPart saving and is not portable.
+--[[
+-- Find and get our PartTagger dependency, preferring to use a global one rather than our local one unless if absolutely necessary
+local PartTagger
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+PartTagger = ReplicatedStorage:WaitForChild("PartTagger", 10)
+
+-- Wait for a PartTagger in ReplicatedStorage, with an intentionally long timeout. If we don't find it, use our builtin one.
+if PartTagger == nil then
+	PartTagger = require(script:WaitForChild("PartTagger"))
+end
+
+PartTagger = require(PartTagger)
+]]
+
 for _, Module in ipairs(TypeFolder:GetChildren()) do
-	local ThisType = require(Module)
+	ThisType = require(Module)
 	
 	-- Find what it provides, update the LoadingTypes table.
 	for ProvidingString, Id in pairs(ThisType.Provides) do
@@ -53,7 +66,7 @@ for Id, TypeData in pairs(LoadingTypes) do
 end
 
 -- Ensure all requires are valid
-for _, TypeData in pairs(LoadingTypes) do
+for Id, TypeData in pairs(LoadingTypes) do
 	for _, Name in TypeData.Requires do
 		assert(TypeToId[Name] ~= nil, TypeData.Name .. " requires type " .. Name .. " which does not exist. Erroring.")
 	end
@@ -78,7 +91,7 @@ while true do -- We should never hit 100 subtypes (says me as I am writing this 
 
 	for Id, TypeData in pairs(LoadingTypes) do
 		-- get the first requirement, see if it exists
-		local TargetType = Types[TypeToId[TypeData.Requires[1]]]
+		TargetType = Types[TypeToId[TypeData.Requires[1]]]
 		if TargetType then
 			-- build the table
 			for _, PropertyData in ipairs(TargetType.Properties) do
@@ -104,6 +117,7 @@ while true do -- We should never hit 100 subtypes (says me as I am writing this 
 
 	-- check to see if we have finished loading types
 	if #LoadingTypes == 0 then
+		LoadingTypes = nil :: any
 		break
 	end
 end
@@ -126,35 +140,69 @@ local WriteAssetIdTypes = {
 
 -- Buffer, Type, Value, Argument
 local WriteValueByTypeTable = {
-	["Float64"] = function(Buffer, Value, _)
+	["Float64"] = function(Buffer, Value, Argument)
 		Buffer:WriteFloat64(Value)
 	end,
-	["Float32"] = function(Buffer, Value, _)
+	["Float32"] = function(Buffer, Value, Argument)
 		Buffer:WriteFloat32(Value)
 	end,
-	["String"] = function(Buffer, Value, _)
+	["String"] = function(Buffer, Value, Argument)
 		Buffer:WriteString(Value)
+	end,
+	["Int"] = function(Buffer, Value, Argument)
+		Buffer:WriteInt(Argument, Value)
 	end,
 	["UnsignedInt"] = function(Buffer, Value, Argument)
 		Buffer:WriteUInt(Argument, Value)
 	end,
+	["NumberRange"] = function(Buffer, Value, Argument)
+		Buffer:WriteFloat64(Value.Min)
+		Buffer:WriteFloat64(Value.Max)
+	end,
+	["NumberSequence"] = function(Buffer, Value: NumberSequence, Argument)
+		Buffer:WriteUInt(12, #Value.Keypoints)
+		for _, Keypoint in Value.Keypoints do
+			Buffer:WriteFloat32(Keypoint.Time)
+			Buffer:WriteFloat64(Keypoint.Value)
+			Buffer:WriteFloat32(Keypoint.Envelope)
+		end
+	end,
 	["Value"] = function(Buffer, Value, Argument)
 		Buffer:WriteUInt(Argument, Value.Value)
 	end,
-	["Bool"] = function(Buffer, Value, _)
+	["Bool"] = function(Buffer, Value, Argument)
 		Buffer:WriteBool(Value)
 	end,
-	["Vector3"] = function(Buffer, Value, _)
+	["Vector2"] = function(Buffer, Value, Argument)
+		Buffer:WriteFloat32(Value.X)
+		Buffer:WriteFloat32(Value.Y)
+	end,
+	["Vector3"] = function(Buffer, Value, Argument)
 		Buffer:WriteFloat32(Value.X)
 		Buffer:WriteFloat32(Value.Y)
 		Buffer:WriteFloat32(Value.Z)
 	end,
-	["Color3"] = function(Buffer, Value, _)
+	["UDim2"] = function(Buffer, Value: UDim2, Argument)
+		Buffer:WriteFloat32(Value.X.Scale)
+		Buffer:WriteInt(32, Value.X.Offset)
+		Buffer:WriteFloat32(Value.Y.Scale)
+		Buffer:WriteInt(32, Value.Y.Offset)
+	end,
+	["Color3"] = function(Buffer, Value, Argument)
 		Buffer:WriteFloat32(Value.R)
 		Buffer:WriteFloat32(Value.G)
 		Buffer:WriteFloat32(Value.B)
 	end,
-	["RBXAssetId"] = function(Buffer, Value, _)
+	["ColorSequence"] = function(Buffer, Value: ColorSequence, Argument)
+		Buffer:WriteUInt(12, #Value.Keypoints)
+		for _, Keypoint in Value.Keypoints do
+			Buffer:WriteFloat32(Keypoint.Time)
+			Buffer:WriteFloat32(Keypoint.Value.R)
+			Buffer:WriteFloat32(Keypoint.Value.G)
+			Buffer:WriteFloat32(Keypoint.Value.B)
+		end
+	end,
+	["RBXAssetId"] = function(Buffer, Value, Argument)
 		-- Separate this out to see what format it is in
 		local TextureId = 0
 		local TextureType = 0
@@ -169,13 +217,12 @@ local WriteValueByTypeTable = {
 			end
 		end
 		
-		-- this should be plenty for the rest of the existence of roblox, i hope
-		-- if not just bump this number up
-		local TextureIdPart1 = math.floor(TextureId / 100000)
-		local TextureIdPart2 = TextureId - (TextureIdPart1 * 100000)
-		Buffer:WriteUInt(24, TextureIdPart1)
-		Buffer:WriteUInt(17, TextureIdPart2)
+		Buffer:WriteString(tostring(TextureId))
 		Buffer:WriteUInt(2, TextureType)
+	end,
+	["Attribute"] = function(Buffer, Value, Argument)
+		-- String attributes are assumed as of now. Improve later.
+		Buffer:WriteString(tostring(Value))
 	end,
 }
 
@@ -185,59 +232,104 @@ local function writeValueByType(Buffer, Type, Value, Argument)
 	if CallingType then
 		WriteValueByTypeTable[Type](Buffer, Value, Argument)
 	else
-		error("Invalid type " .. Type)
+		error("Invalid type " .. tostring(Type))
 	end
 end
 
 -- Buffer, Property
 local GetDeserializedValueTable = {
-	["Float64"] = function(Buffer, _)
+	["Float64"] = function(Buffer, Property)
 		return Buffer:ReadFloat64()
 	end,
-	["Float32"] = function(Buffer, _)
+	["Float32"] = function(Buffer, Property)
 		return Buffer:ReadFloat32()
 	end,
-	["String"] = function(Buffer, _)
+	["String"] = function(Buffer, Property)
 		return Buffer:ReadString()
+	end,
+	["Int"] = function(Buffer, Property)
+		return Buffer:ReadInt(Property[4])
 	end,
 	["UnsignedInt"] = function(Buffer, Property)
 		return Buffer:ReadUInt(Property[4])
 	end,
+	["NumberRange"] = function(Buffer, Property)
+		local Min = Buffer:ReadFloat64()
+		local Max = Buffer:ReadFloat64()
+		return NumberRange.new(Min, Max)
+	end,
+	["NumberSequence"] = function(Buffer, Property)
+		local KeypointCount = Buffer:ReadUInt(12)
+		local NumberKeypointArray = {}
+		for _ = 1, KeypointCount do
+			local Time = Buffer:ReadFloat32()
+			local Value = Buffer:ReadFloat64()
+			local Envelope = Buffer:ReadFloat32()
+			table.insert(NumberKeypointArray, NumberSequenceKeypoint.new(Time, Value, Envelope))
+		end
+
+		return NumberSequence.new(NumberKeypointArray)
+	end,
 	["Value"] = function(Buffer, Property)
 		return Buffer:ReadUInt(Property[4])
 	end,
-	["Bool"] = function(Buffer, _)
+	["Bool"] = function(Buffer, Property)
 		return Buffer:ReadBool()
 	end,
-	["Vector3"] = function(Buffer, _)
+	["Vector2"] = function(Buffer, Property)
+		local X = Buffer:ReadFloat32()
+		local Y = Buffer:ReadFloat32()
+		return Vector2.new(X, Y)
+	end,
+	["Vector3"] = function(Buffer, Property)
 		local X = Buffer:ReadFloat32()
 		local Y = Buffer:ReadFloat32()
 		local Z = Buffer:ReadFloat32()
 		return Vector3.new(X, Y, Z)
 	end,
-	["Color3"] = function(Buffer, _)
-		local X = Buffer:ReadFloat32()
-		local Y = Buffer:ReadFloat32()
-		local Z = Buffer:ReadFloat32()
-		return Color3.new(X, Y, Z)
+	["UDim2"] = function(Buffer, Property)
+		local XScale = Buffer:ReadFloat32()
+		local XOffset = Buffer:ReadInt(32)
+		local YScale = Buffer:ReadFloat32()
+		local YOffset = Buffer:ReadInt(32)
+		return UDim2.new(XScale, XOffset, YScale, YOffset)
 	end,
-	["Instance"] = function(Buffer, _)
+	["ColorSequence"] = function(Buffer, Value: ColorSequence, Argument)
+		local KeypointCount = Buffer:ReadUInt(12)
+		local ColorKeypointArray = {}
+		for _ = 1, KeypointCount do
+			local Time = Buffer:ReadFloat32()
+			local R = Buffer:ReadFloat32()
+			local G = Buffer:ReadFloat32()
+			local B = Buffer:ReadFloat32()
+			table.insert(ColorKeypointArray, ColorSequenceKeypoint.new(Time, Color3.new(R, G, B)))
+		end
+
+		return ColorSequence.new(ColorKeypointArray)
+	end,
+	["Color3"] = function(Buffer, Property)
+		local R = Buffer:ReadFloat32()
+		local G = Buffer:ReadFloat32()
+		local B = Buffer:ReadFloat32()
+		return Color3.new(R, G, B)
+	end,
+	["Instance"] = function(Buffer, Property)
 		return Buffer:ReadUInt(32)
 	end,
-	["RBXAssetId"] = function(Buffer, _)
-		-- We have to divide the number into two.
-		local TextureIdPart1 = Buffer:ReadUInt(24)
-		local TextureIdPart2 = Buffer:ReadUInt(17)
+	["RBXAssetId"] = function(Buffer, Property)
+		-- We have to divide the number into two due to library limitations
+		local TextureId = tonumber(Buffer:ReadString())
 		local TextureType = Buffer:ReadUInt(2)
 		
-		TextureIdPart1 *= 100000
-		local TextureId = TextureIdPart1 + TextureIdPart2
-		
-		if TextureId == 0 then
+		if (TextureId == 0 or TextureId == nil) then
 			return ""
 		else
 			return WriteAssetIdTypes[TextureType] .. tostring(TextureId)
 		end
+	end,
+	["Attribute"] = function(Buffer, Property)
+		-- String attributes are assumed as of now. Improve later.
+		return Buffer:ReadString()
 	end,
 }
 
@@ -266,9 +358,17 @@ function BitBufferSerialization.Serialize(Items)
 			ValidItems += 1
 			table.insert(ValidItemsTable, Item)
 			-- deserialization
+		else
+			-- warn(Item.ClassName)
 		end
 	end
 	
+	for _, Item in Items do
+		if Item:IsA("MeshPart") then
+			Item:SetAttribute("MeshId", Item.MeshId)
+		end
+	end
+
 	-- Inverse our table for reference below:
 	local InstanceToId = {}
 	for Index, Item in ipairs(ValidItemsTable) do
@@ -312,14 +412,21 @@ function BitBufferSerialization.Serialize(Items)
 				-- btw this is the main code that makes it instance only, if this was changed theoretically it could be used
 				-- for other stuff xd?
 				-- or nil is to make it explicit
-				if Property[2] ~= "Bool" and Property[3] == Item[Property[1]] then
+				local PropertyValue
+				if Property[2] ~= "Attribute" then
+					PropertyValue = Item[Property[1]]
+				else
+					PropertyValue = tostring(Item:GetAttribute(Property[1]))
+				end
+
+				if Property[2] ~= "Bool" and Property[3] == PropertyValue then
 					-- this is a default value!!!
 					Buffer:WriteBool(true)
 				else
 					if Property[2] ~= "Bool" then
 						Buffer:WriteBool(false)
 					end
-					writeValueByType(Buffer, Property[2], Item[Property[1]], Property[4] or nil)
+					writeValueByType(Buffer, Property[2], PropertyValue, Property[4] or nil)
 				end
 			end
 		end
@@ -355,10 +462,13 @@ function BitBufferSerialization.Deserialize(Data)
 	
 	for ItemId = 1, ItemNumber do
 		local TypeId = Buffer:ReadUInt(12)
+		-- This system should be changed to not care for the ItemId, and rather, simply read until it runs out of items to read.
+		-- Alternatively, the ItemId should just be derived from the index as based upon the item number.
+		-- Because of this, it may not be needed in the first place to write a physical ItemId. This would save approximately 1 character per 4 items, or at 1 item, 250,000 characters.
 		
 		local ItemType = Types[TypeId]
 		--print(ItemType, TypeId)
-		local NewInstance = Instance.new(ItemType.Name)
+		local NewInstance = Instance.new(ItemType["InstanceNameOverride"] or ItemType.Name)
 		for Index, Property in ipairs(ItemType.Properties) do
 			if Index ~= 1 then -- skip typeid and item
 				if Property[2] == "Instance" then -- handle instances manually because we do them all at the end
@@ -366,6 +476,11 @@ function BitBufferSerialization.Deserialize(Data)
 						InstancesToSet[NewInstance] = {}
 					end
 					InstancesToSet[NewInstance][Property[1]] = getDeserializedValue(Buffer, Property)
+				elseif Property[2] == "Attribute" then
+					local NewValue = tostring(getDeserializedValue(Buffer, Property))
+					if NewValue ~= "nil" then
+						NewInstance:SetAttribute(Property[1], NewValue)
+					end
 				else
 					NewInstance[Property[1]] = getDeserializedValue(Buffer, Property)
 				end
@@ -379,12 +494,12 @@ function BitBufferSerialization.Deserialize(Data)
 	local ReturnItems = {}
 	local WaitIndex = 0
 	
-	for Item, ItemData in pairs(InstancesToSet) do
+	for Item, Data in pairs(InstancesToSet) do
 		WaitIndex += 1
 		if WaitIndex % 10000 == 0 then
 			task.wait(0.04)
 		end
-		for PropertyName, ParentId in pairs(ItemData) do
+		for PropertyName, ParentId in pairs(Data) do
 			if ParentId == 1 then
 				table.insert(ReturnItems, Item)
 			elseif ParentId ~= 0 then
@@ -392,7 +507,18 @@ function BitBufferSerialization.Deserialize(Data)
 			end
 		end
 	end
+
+	-- Perform our pass over the ReturnItems to replace MeshParts
+	--[[
+	-- PartTagger code block.
+	local NewReturnItems = {}
+	for _, Item in ReturnItems do
+		table.insert(NewReturnItems, PartTagger:ReplacedAllWithTagged(Item))
+	end
 	
+	return NewReturnItems
+	]]
+
 	return ReturnItems
 end
 

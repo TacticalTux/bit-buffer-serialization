@@ -8,6 +8,7 @@ BasePartType.Properties = {
 	{"Color", "Color3", Color3.fromRGB(163, 162, 165)},
 	{"Material", "Value", Enum.Material.Plastic, 12},
 	{"Anchored", "Bool", true},
+	{"Locked", "Bool", false},
 	{"CanCollide", "Bool", true},
 	{"Reflectance", "Float32", 0},
 	{"Transparency", "Float32", 0},
